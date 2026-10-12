@@ -5,7 +5,7 @@ An end-to-end Big Data Analytics lab project implementing real-time sensor strea
 ---
 
 ## 1. System Architecture
-![alt text](image.png)
+
 
 ```mermaid
 
