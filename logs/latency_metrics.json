@@ -1,0 +1,8 @@
+{
+  "total_alerts": 1,
+  "latency_min_seconds": 29.49,
+  "latency_avg_seconds": 29.49,
+  "latency_max_seconds": 29.49,
+  "last_updated": "2026-10-12T07:05:08.599755+00:00",
+  "sla_target_met": true
+}

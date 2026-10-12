@@ -1,0 +1,176 @@
+services:
+  # ==========================================
+  # Apache Kafka & ZooKeeper
+  # ==========================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: bda-zookeeper
+    hostname: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bda-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: bda-kafka
+    hostname: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - bda-net
+
+  # Topic Initialization Service
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: bda-kafka-init
+    depends_on:
+      - kafka
+    entrypoint: [ "/bin/sh", "-c" ]
+    command: |
+      "
+      echo 'Waiting for Kafka to be ready...'
+      cub kafka-ready -b kafka:29092 1 40
+      
+      echo 'Creating Kafka topic: air-quality-raw (3 partitions)...'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic air-quality-raw --partitions 3 --replication-factor 1
+      
+      echo 'Creating Kafka topic: air-quality-alerts (3 partitions)...'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic air-quality-alerts --partitions 3 --replication-factor 1
+      
+      echo 'Kafka topics created successfully:'
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
+    networks:
+      - bda-net
+
+  # ==========================================
+  # Apache Hadoop HDFS (NameNode & DataNode)
+  # ==========================================
+  namenode:
+    image: apache/hadoop:3.3.6
+    container_name: bda-namenode
+    hostname: namenode
+    user: "root"
+    environment:
+      HADOOP_HOME: /opt/hadoop
+      HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
+    ports:
+      - "9870:9870"  # NameNode Web UI
+      - "9000:9000"  # HDFS IPC
+    volumes:
+      - ./hadoop_config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop_config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - hadoop_namenode_data:/opt/hadoop/data/nameNode
+    command: >-
+      bash -c "mkdir -p /opt/hadoop/data/nameNode; if [ ! -d '/opt/hadoop/data/nameNode/current' ]; then echo 'Formatting HDFS NameNode...'; hdfs namenode -format -force; fi; hdfs namenode"
+    healthcheck:
+      test: ["CMD-SHELL", "hdfs dfsadmin -report || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - bda-net
+
+  datanode:
+    image: apache/hadoop:3.3.6
+    container_name: bda-datanode
+    hostname: datanode
+    user: "root"
+    depends_on:
+      - namenode
+    ports:
+      - "9864:9864"  # DataNode Web UI
+    environment:
+      HADOOP_HOME: /opt/hadoop
+      HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
+    volumes:
+      - ./hadoop_config/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./hadoop_config/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - hadoop_datanode_data:/opt/hadoop/data/dataNode
+    command: >-
+      bash -c "mkdir -p /opt/hadoop/data/dataNode; hdfs datanode"
+    networks:
+      - bda-net
+
+  # ==========================================
+  # Apache Spark (Master & Worker)
+  # ==========================================
+  spark-master:
+    image: bitnamilegacy/spark:3.4.1
+    container_name: bda-spark-master
+    hostname: spark-master
+    environment:
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+    ports:
+      - "7077:7077"  # Spark Master RPC
+      - "8085:8080"  # Spark Master Web UI (mapped to 8085 to avoid 8080 conflicts)
+    volumes:
+      - .:/workspace
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bda-net
+
+  spark-worker:
+    image: bitnamilegacy/spark:3.4.1
+    container_name: bda-spark-worker
+    hostname: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 1G
+      SPARK_WORKER_CORES: 2
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: "no"
+      SPARK_SSL_ENABLED: "no"
+    ports:
+      - "8086:8081"  # Spark Worker Web UI
+    volumes:
+      - .:/workspace
+    networks:
+      - bda-net
+
+volumes:
+  hadoop_namenode_data:
+  hadoop_datanode_data:
+
+networks:
+  bda-net:
+    driver: bridge
